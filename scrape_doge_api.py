@@ -27,7 +27,7 @@ from urllib.parse import urlencode, urljoin
 from urllib.request import Request, build_opener
 
 BASE_URL = "https://api.doge.gov/"
-ENDPOINTS = ("grants", "contracts", "leases", "payments")
+ENDPOINTS = ("savings/grants", "savings/contracts", "savings/leases", "payments")
 DEFAULT_PER_PAGE = 100
 DEFAULT_SLEEP = 0.5  # seconds
 MAX_RETRIES = 5
@@ -39,9 +39,7 @@ JsonObject = Mapping[str, Any]
 @dataclass
 class PageResult:
     """Container for a paginated response."""
-
     records: List[JsonObject]
-    next_url: Optional[str]
 
 
 class ScraperError(RuntimeError):
@@ -101,15 +99,13 @@ class ApiClient:
         raise ScraperError(f"Unable to fetch {url} after {MAX_RETRIES} attempts")
 
 
-def parse_page(payload: Any) -> PageResult:
+def parse_page(payload: List[dict]) -> PageResult:
     """Extract the list of records and the next URL from a payload."""
-
     if isinstance(payload, list):
         records = payload
         next_url = None
     elif isinstance(payload, Mapping):
         records = _extract_record_list(payload)
-        next_url = _extract_next_link(payload)
     else:
         raise ScraperError(
             "Unexpected response format: expected list or object, "
@@ -130,14 +126,13 @@ def parse_page(payload: Any) -> PageResult:
                 "Encountered non-object record in response payload"
             )
 
-    return PageResult(records=normalized_records, next_url=next_url)
+    return PageResult(records=normalized_records)
 
 
 def _extract_record_list(payload: Mapping[str, Any]) -> List[Any]:
-    for key in ("results", "data", "items", "records"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
+    value = payload.get('result')
+    if isinstance(value, list):
+        return value
     if isinstance(payload.get("value"), list):
         return payload["value"]
     if isinstance(payload.get("response"), list):
@@ -217,27 +212,36 @@ def scrape_endpoint(
     next_url: Optional[str] = urljoin(
         client.base_url, f"{endpoint}?{urlencode({'page': page_number, 'per_page': per_page})}"
     )
-
+    #Keep going until there's no more to pull
     while next_url:
+        print("Scraping page ",page_number, ".")
+        #Retrieve payload
         current_url = next_url
         payload = client.request(current_url)
-        page = parse_page(payload)
-
+        #Pull results from payload according to endpoint
+        if endpoint == 'savings/grants':
+            payload_res = payload['result']['grants']
+        elif endpoint == 'savings/contracts':
+            payload_res = payload['result']['contracts']
+        elif endpoint == 'savings/leases':
+            payload_res = payload['result']['leases']
+        elif endpoint == 'payments':
+            payload_res = payload['result']['payments']
+        else:
+            raise Error(f"Invalid endpoint {endpoint}: {exc}") from exc
+        page = parse_page(payload_res)
+        #Flatten results, append
         for record in page.records:
             results.append(flatten_record(record))
-
-        if page.next_url:
-            next_url = page.next_url
-            if not next_url.startswith("http"):
-                next_url = urljoin(client.base_url, next_url)
+        print(len(page.records), "results retrieved.")
+        #Check whether to continue
+        if len(page.records) < per_page:
+            next_url = None
         else:
-            if len(page.records) < per_page:
-                next_url = None
-            else:
-                page_number += 1
-                query = urlencode({"page": page_number, "per_page": per_page})
-                next_url = urljoin(client.base_url, f"{endpoint}?{query}")
-
+            page_number += 1
+            query = urlencode({"page": page_number, "per_page": per_page})
+            next_url = urljoin(client.base_url, f"{endpoint}?{query}")
+        #Wait before submitting next request
         time.sleep(sleep)
 
     return results
